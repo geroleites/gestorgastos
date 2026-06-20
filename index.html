@@ -419,6 +419,7 @@ function colorFor(key, list){const i = list.indexOf(key); return PALETTE[(i<0?0:
 
 /* ============================== STORAGE ============================== */
 const HAS_CLAUDE_STORAGE = (typeof window !== 'undefined' && !!window.storage);
+const SYNC_KEYS = ['accounts','expenses','investments','balances','categories'];
 const Store = {
   async load(key, fallback){
     try{
@@ -435,8 +436,35 @@ const Store = {
       if(HAS_CLAUDE_STORAGE){ await window.storage.set(key, JSON.stringify(value)); }
       else { localStorage.setItem('libreta:'+key, JSON.stringify(value)); }
     }catch(e){ console.error('No se pudo guardar', key, e); }
+    if(!HAS_CLAUDE_STORAGE && SYNC_KEYS.includes(key)) pushRemoteState(key, value);
   }
 };
+
+/* ---- Remote state mirror (cross-device sync via Google Sheets), only when hosted outside Claude ---- */
+async function pushRemoteState(key, value){
+  if(!state.settings || !state.settings.sheetsOn || !state.settings.sheetsUrl) return;
+  try{
+    await fetch(state.settings.sheetsUrl, {
+      method:'POST',
+      headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body: JSON.stringify({ action:'set', key, value })
+    });
+  }catch(e){ console.error('Error sincronizando estado remoto:', key, e); }
+}
+
+async function fetchRemoteState(url){
+  try{
+    const sep = url.includes('?') ? '&' : '?';
+    const res = await fetch(url + sep + 'action=getAll');
+    if(!res.ok) return null;
+    return await res.json();
+  }catch(e){ console.error('No se pudo leer el estado remoto:', e); return null; }
+}
+
+async function pushAllStateNow(){
+  if(HAS_CLAUDE_STORAGE) return;
+  for(const key of SYNC_KEYS){ await pushRemoteState(key, state[key]); }
+}
 
 /* ============================== STATE ============================== */
 let state = {
@@ -450,12 +478,28 @@ let state = {
 function uid(){ return (crypto.randomUUID ? crypto.randomUUID() : 'id-'+Date.now()+'-'+Math.random().toString(36).slice(2)); }
 
 async function loadAll(){
-  state.accounts = await Store.load('accounts', []);
-  state.expenses = await Store.load('expenses', []);
-  state.investments = await Store.load('investments', []);
-  state.balances = await Store.load('balances', []);
-  state.categories = await Store.load('categories', DEFAULT_CATEGORIES.slice());
   state.settings = await Store.load('settings', { sheetsUrl:'', sheetsOn:false });
+
+  let remote = null;
+  if(!HAS_CLAUDE_STORAGE && state.settings.sheetsOn && state.settings.sheetsUrl){
+    remote = await fetchRemoteState(state.settings.sheetsUrl);
+  }
+
+  if(remote){
+    state.accounts = remote.accounts || [];
+    state.expenses = remote.expenses || [];
+    state.investments = remote.investments || [];
+    state.balances = remote.balances || [];
+    state.categories = (remote.categories && remote.categories.length) ? remote.categories : DEFAULT_CATEGORIES.slice();
+    // cache locally so the app still works offline with the latest known data
+    SYNC_KEYS.forEach(k => { try{ localStorage.setItem('libreta:'+k, JSON.stringify(state[k])); }catch(e){} });
+  } else {
+    state.accounts = await Store.load('accounts', []);
+    state.expenses = await Store.load('expenses', []);
+    state.investments = await Store.load('investments', []);
+    state.balances = await Store.load('balances', []);
+    state.categories = await Store.load('categories', DEFAULT_CATEGORIES.slice());
+  }
 }
 async function persist(key){ await Store.save(key, state[key]); }
 
@@ -1053,13 +1097,14 @@ function renderAjustes(){
 
     <div class="section-title">Sincronización con Google Sheets</div>
     <div class="card">
-      <div class="help-text" style="margin-bottom:12px;">Pegá la URL de tu Web App de Google Apps Script para que cada gasto, inversión o saldo se envíe automáticamente a tu planilla. (Te paso el script para crearla.)</div>
+      <div class="help-text" style="margin-bottom:12px;">${HAS_CLAUDE_STORAGE? 'La sincronización en vivo solo funciona en la versión alojada fuera de Claude (GitHub Pages). Acá podés configurar la URL para más adelante, pero los movimientos no se van a enviar mientras uses esta versión dentro de Claude.' : 'Pegá la URL de tu Web App de Google Apps Script. Tu planilla va a quedar como la fuente de datos compartida: cada cambio se sube ahí, y cada dispositivo que abra la app con esta misma URL va a cargar el estado más reciente al iniciar.'}</div>
       <div class="field"><label>URL del Web App</label><input type="text" id="sheets-url" placeholder="https://script.google.com/macros/s/.../exec" value="${escapeHtml(state.settings.sheetsUrl||'')}"></div>
       <div class="switch-row">
         <span style="font-size:13.5px;font-weight:600;">Sincronización activa</span>
         <button class="switch ${state.settings.sheetsOn?'on':''}" id="sheets-toggle"><span class="knob"></span></button>
       </div>
       <button class="btn-secondary" id="save-sheets" style="margin-top:14px;">Guardar</button>
+      ${!HAS_CLAUDE_STORAGE?`<button class="btn-secondary" id="sync-now-btn" style="margin-top:10px;">Sincronizar ahora</button>`:''}
     </div>
 
     <div class="section-title">Exportar datos</div>
@@ -1079,6 +1124,13 @@ function renderAjustes(){
   document.querySelectorAll('[data-del-cat]').forEach(el=>el.addEventListener('click', ()=>removeCategory(el.dataset.delCat)));
   document.getElementById('sheets-toggle').addEventListener('click', (e)=>{ e.target.closest('.switch').classList.toggle('on'); });
   document.getElementById('save-sheets').addEventListener('click', saveSheetsSettings);
+  const syncNowBtn = document.getElementById('sync-now-btn');
+  if(syncNowBtn) syncNowBtn.addEventListener('click', async ()=>{
+    if(!state.settings.sheetsUrl){ showToast('Primero guardá la URL'); return; }
+    showToast('Sincronizando...');
+    await pushAllStateNow();
+    showToast('Estado enviado a Sheets');
+  });
   document.getElementById('exp-gastos').addEventListener('click', ()=>exportCSV('expenses'));
   document.getElementById('exp-inv').addEventListener('click', ()=>exportCSV('investments'));
   document.getElementById('exp-bal').addEventListener('click', ()=>exportCSV('balances'));
@@ -1102,10 +1154,17 @@ async function removeCategory(c){
   renderAjustes();
 }
 async function saveSheetsSettings(){
+  const wasOn = state.settings.sheetsOn;
   state.settings.sheetsUrl = document.getElementById('sheets-url').value.trim();
   state.settings.sheetsOn = document.getElementById('sheets-toggle').classList.contains('on');
   await persist('settings');
-  showToast('Ajustes guardados');
+  if(!HAS_CLAUDE_STORAGE && state.settings.sheetsOn && state.settings.sheetsUrl && (!wasOn)){
+    showToast('Ajustes guardados, enviando tus datos...');
+    await pushAllStateNow();
+    showToast('Listo, datos sincronizados');
+  } else {
+    showToast('Ajustes guardados');
+  }
 }
 function toCSV(rows, headers){
   const esc = v => `"${String(v==null?'':v).replace(/"/g,'""')}"`;
