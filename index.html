@@ -368,10 +368,30 @@ hr.div{border:none;border-top:1px solid var(--line);margin:18px 0;}
 .switch.on{background:var(--income);}
 .switch .knob{position:absolute;top:2px;left:2px;width:22px;height:22px;border-radius:50%;background:#fff;transition:left .15s;box-shadow:0 1px 3px rgba(0,0,0,.2);}
 .switch.on .knob{left:22px;}
+
+/* ---------- auth screen ---------- */
+.auth-screen{
+  min-height:100vh;display:flex;align-items:center;justify-content:center;
+  padding:24px;background:var(--hero-grad);
+}
+.auth-card{
+  width:100%;max-width:380px;background:var(--paper-card);border-radius:24px;
+  padding:32px 26px;box-shadow:0 20px 50px rgba(21,18,58,.35);animation:popIn .3s ease both;
+}
+.auth-brand{display:flex;align-items:center;gap:10px;margin-bottom:26px;}
+.auth-brand .mark{width:36px;height:36px;border-radius:11px;background:var(--hero-grad);display:flex;align-items:center;justify-content:center;color:#fff;font-family:var(--font-display);font-weight:700;font-size:16px;}
+.auth-brand span:last-child{font-family:var(--font-display);font-size:20px;font-weight:700;color:var(--ink);}
+.auth-title{font-family:var(--font-display);font-size:21px;font-weight:700;color:var(--ink);margin-bottom:6px;letter-spacing:-.01em;}
+.auth-sub{font-size:13px;color:var(--text-muted);margin-bottom:22px;line-height:1.5;}
+.auth-error{background:rgba(255,77,109,.08);border:1px solid rgba(255,77,109,.25);color:var(--expense);font-size:12.5px;font-weight:600;padding:10px 13px;border-radius:11px;margin-bottom:14px;}
+.auth-switch{text-align:center;font-size:13px;color:var(--text-muted);margin-top:18px;}
+.auth-switch button{background:none;border:none;color:var(--brass);font-weight:700;font-size:13px;}
+.auth-loading{min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--hero-grad);color:#fff;font-family:var(--font-display);font-weight:600;}
 </style>
 </head>
 <body>
-<div id="app">
+<div id="auth-root" style="display:none;"></div>
+<div id="app" style="display:none;">
   <nav class="sidebar" id="sidebar"></nav>
   <div class="main-col">
     <div class="topbar">
@@ -383,12 +403,34 @@ hr.div{border:none;border-top:1px solid var(--line);margin:18px 0;}
   </div>
 </div>
 
-<nav class="bottom-nav" id="bottom-nav"></nav>
-<button class="fab" id="fab-btn" aria-label="Agregar"></button>
+<nav class="bottom-nav" id="bottom-nav" style="display:none;"></nav>
+<button class="fab" id="fab-btn" aria-label="Agregar" style="display:none;"></button>
 <div class="overlay" id="overlay"><div class="sheet" id="sheet"></div></div>
 <div class="toast" id="toast"></div>
 
-<script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-app.js";
+import {
+  getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword,
+  signOut, sendPasswordResetEmail
+} from "https://www.gstatic.com/firebasejs/12.15.0/firebase-auth.js";
+import {
+  getFirestore, collection, doc, setDoc, deleteDoc, getDocs, onSnapshot
+} from "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyAoPzXfmorIpxjry5gV7qvEJRusEZKkJXg",
+  authDomain: "nomo-90bf7.firebaseapp.com",
+  projectId: "nomo-90bf7",
+  storageBucket: "nomo-90bf7.firebasestorage.app",
+  messagingSenderId: "747417270850",
+  appId: "1:747417270850:web:247370e53ddbd327374bdb"
+};
+const fbApp = initializeApp(firebaseConfig);
+const auth = getAuth(fbApp);
+const db = getFirestore(fbApp);
+let currentUser = null;
+
 /* ============================== ICONS ============================== */
 const ICONS = {
   home:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>',
@@ -417,72 +459,64 @@ const CURRENCIES = ['UYU','USD'];
 const PALETTE = ['#6C4CFF','#12C892','#FF4D6D','#FFB13C','#3DD6F5','#A66BFF','#FF8A5C','#2BB3A3','#FFD23F','#6E7191','#4ECDC4'];
 function colorFor(key, list){const i = list.indexOf(key); return PALETTE[(i<0?0:i) % PALETTE.length];}
 
-/* ============================== STORAGE ============================== */
-const HAS_CLAUDE_STORAGE = (typeof window !== 'undefined' && !!window.storage);
-const SYNC_KEYS = ['accounts','expenses','investments','balances','categories'];
-const Store = {
-  async load(key, fallback){
-    try{
-      if(HAS_CLAUDE_STORAGE){
-        const r = await window.storage.get(key);
-        return (r && r.value) ? JSON.parse(r.value) : fallback;
-      }
-      const v = localStorage.getItem('libreta:'+key);
-      return v!=null ? JSON.parse(v) : fallback;
-    }catch(e){ return fallback; }
-  },
-  async save(key, value){
-    try{
-      if(HAS_CLAUDE_STORAGE){ await window.storage.set(key, JSON.stringify(value)); }
-      else { localStorage.setItem('libreta:'+key, JSON.stringify(value)); }
-    }catch(e){ console.error('No se pudo guardar', key, e); }
-    if(!HAS_CLAUDE_STORAGE && SYNC_KEYS.includes(key)) pushRemoteState(key, value);
-  }
-};
+/* ============================== FIRESTORE DATA LAYER ============================== */
+function userCol(name){ return collection(db, 'users', currentUser.uid, name); }
+function userDoc(name, id){ return doc(db, 'users', currentUser.uid, name, id); }
+function userMetaDoc(name){ return doc(db, 'users', currentUser.uid, 'meta', name); }
 
-/* ---- Remote state mirror (cross-device sync via Google Sheets), only when hosted outside Claude ---- */
-async function pushRemoteState(key, value){
-  if(!state.settings || !state.settings.sheetsOn || !state.settings.sheetsUrl) return;
+async function saveRecord(collectionName, record){
+  await setDoc(userDoc(collectionName, record.id), record);
+}
+async function removeRecord(collectionName, id){
+  await deleteDoc(userDoc(collectionName, id));
+}
+async function saveCategories(list){
+  await setDoc(userMetaDoc('categories'), { list });
+}
+
+let unsubscribers = [];
+function startListeners(){
+  stopListeners();
+  ['accounts','expenses','investments','balances'].forEach(name=>{
+    const unsub = onSnapshot(userCol(name), (snap)=>{
+      state[name] = snap.docs.map(d=>d.data());
+      renderAll();
+    }, (err)=>{ console.error('Error de sincronización en '+name, err); });
+    unsubscribers.push(unsub);
+  });
+  const catUnsub = onSnapshot(userMetaDoc('categories'), (snap)=>{
+    state.categories = (snap.exists() && snap.data().list && snap.data().list.length) ? snap.data().list : DEFAULT_CATEGORIES.slice();
+    renderAll();
+  }, (err)=>{ console.error('Error de categorías', err); });
+  unsubscribers.push(catUnsub);
+}
+function stopListeners(){
+  unsubscribers.forEach(u=>u());
+  unsubscribers = [];
+}
+
+async function maybeOfferLocalImport(){
   try{
-    await fetch(state.settings.sheetsUrl, {
-      method:'POST',
-      headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body: JSON.stringify({ action:'set', key, value })
-    });
-  }catch(e){ console.error('Error sincronizando estado remoto:', key, e); }
-}
-
-async function fetchRemoteState(url){
-  try{
-    const sep = url.includes('?') ? '&' : '?';
-    const res = await fetch(url + sep + 'action=getAll');
-    if(!res.ok) return null;
-    return await res.json();
-  }catch(e){ console.error('No se pudo leer el estado remoto:', e); return null; }
-}
-
-async function pushAllStateNow(){
-  if(HAS_CLAUDE_STORAGE) return;
-  for(const key of SYNC_KEYS){ await pushRemoteState(key, state[key]); }
-}
-
-async function pullRemoteNow(){
-  if(HAS_CLAUDE_STORAGE || !state.settings.sheetsUrl) return false;
-  const remote = await fetchRemoteState(state.settings.sheetsUrl);
-  if(!remote) return false;
-  state.accounts = remote.accounts || [];
-  state.expenses = remote.expenses || [];
-  state.investments = remote.investments || [];
-  state.balances = remote.balances || [];
-  if(remote.categories && remote.categories.length) state.categories = remote.categories;
-  SYNC_KEYS.forEach(k => { try{ localStorage.setItem('libreta:'+k, JSON.stringify(state[k])); }catch(e){} });
-  return true;
+    if(localStorage.getItem('nomo:importOffered')) return;
+    localStorage.setItem('nomo:importOffered','1');
+    const get = (k)=>{ try{ return JSON.parse(localStorage.getItem('libreta:'+k)||'[]'); }catch(e){ return []; } };
+    const localAccounts = get('accounts'), localExpenses = get('expenses'), localInvestments = get('investments'), localBalances = get('balances');
+    const hasLocal = localAccounts.length || localExpenses.length || localInvestments.length || localBalances.length;
+    if(!hasLocal) return;
+    if(!confirm('Encontramos datos guardados en este dispositivo de una versión anterior. ¿Querés importarlos a tu cuenta nueva?')) return;
+    for(const a of localAccounts) await saveRecord('accounts', a);
+    for(const e of localExpenses) await saveRecord('expenses', e);
+    for(const i of localInvestments) await saveRecord('investments', i);
+    for(const b of localBalances) await saveRecord('balances', b);
+    const localCats = JSON.parse(localStorage.getItem('libreta:categories')||'[]');
+    if(localCats.length) await saveCategories(localCats);
+    showToast('Datos importados');
+  }catch(e){ console.error('Error importando datos locales', e); }
 }
 
 /* ============================== STATE ============================== */
 let state = {
   accounts: [], expenses: [], investments: [], balances: [], categories: [],
-  settings: { sheetsUrl:'', sheetsOn:false },
   view: 'resumen',
   filters: { gAccount:'all', gCategory:'all', gCurrency:'all', gMonth:'this' },
   metricsPeriod:'this'
@@ -490,31 +524,78 @@ let state = {
 
 function uid(){ return (crypto.randomUUID ? crypto.randomUUID() : 'id-'+Date.now()+'-'+Math.random().toString(36).slice(2)); }
 
-async function loadAll(){
-  state.settings = await Store.load('settings', { sheetsUrl:'', sheetsOn:false });
 
-  let remote = null;
-  if(!HAS_CLAUDE_STORAGE && state.settings.sheetsOn && state.settings.sheetsUrl){
-    remote = await fetchRemoteState(state.settings.sheetsUrl);
-  }
+/* ============================== AUTH SCREEN ============================== */
+let authMode = 'login';
+let authError = '';
 
-  if(remote){
-    state.accounts = remote.accounts || [];
-    state.expenses = remote.expenses || [];
-    state.investments = remote.investments || [];
-    state.balances = remote.balances || [];
-    state.categories = (remote.categories && remote.categories.length) ? remote.categories : DEFAULT_CATEGORIES.slice();
-    // cache locally so the app still works offline with the latest known data
-    SYNC_KEYS.forEach(k => { try{ localStorage.setItem('libreta:'+k, JSON.stringify(state[k])); }catch(e){} });
-  } else {
-    state.accounts = await Store.load('accounts', []);
-    state.expenses = await Store.load('expenses', []);
-    state.investments = await Store.load('investments', []);
-    state.balances = await Store.load('balances', []);
-    state.categories = await Store.load('categories', DEFAULT_CATEGORIES.slice());
+function renderAuthScreen(){
+  const root = document.getElementById('auth-root');
+  const isLogin = authMode === 'login';
+  root.innerHTML = `
+    <div class="auth-screen">
+      <div class="auth-card">
+        <div class="auth-brand"><span class="mark">N</span><span>Nomo</span></div>
+        <div class="auth-title">${isLogin? 'Iniciar sesión' : 'Crear cuenta'}</div>
+        <div class="auth-sub">${isLogin? 'Ingresá con tu mail y contraseña.' : 'Registrate gratis para empezar a usar Nomo.'}</div>
+        ${authError? `<div class="auth-error">${escapeHtml(authError)}</div>` : ''}
+        <div class="field"><label>Email</label><input type="email" id="auth-email" autocomplete="email" placeholder="tu@email.com"></div>
+        <div class="field"><label>Contraseña</label><input type="password" id="auth-password" autocomplete="${isLogin?'current-password':'new-password'}" placeholder="Mínimo 6 caracteres"></div>
+        <button class="btn-primary" id="auth-submit">${isLogin? 'Ingresar' : 'Crear cuenta'}</button>
+        ${isLogin? `<button class="btn-link" id="auth-forgot" style="margin-top:10px;width:100%;text-align:center;">¿Olvidaste tu contraseña?</button>` : ''}
+        <div class="auth-switch">${isLogin? '¿No tenés cuenta?' : '¿Ya tenés cuenta?'} <button id="auth-toggle">${isLogin? 'Creá una' : 'Iniciá sesión'}</button></div>
+      </div>
+    </div>
+  `;
+  document.getElementById('auth-toggle').addEventListener('click', ()=>{ authMode = isLogin?'signup':'login'; authError=''; renderAuthScreen(); });
+  document.getElementById('auth-submit').addEventListener('click', handleAuthSubmit);
+  const forgotBtn = document.getElementById('auth-forgot');
+  if(forgotBtn) forgotBtn.addEventListener('click', handleForgotPassword);
+  root.querySelectorAll('input').forEach(inp=> inp.addEventListener('keydown', e=>{ if(e.key==='Enter') handleAuthSubmit(); }));
+}
+
+async function handleAuthSubmit(){
+  const email = (document.getElementById('auth-email').value||'').trim();
+  const password = document.getElementById('auth-password').value||'';
+  if(!email || !password){ authError = 'Completá email y contraseña.'; renderAuthScreen(); return; }
+  authError = '';
+  const btn = document.getElementById('auth-submit');
+  btn.textContent = 'Un momento...';
+  try{
+    if(authMode==='login'){ await signInWithEmailAndPassword(auth, email, password); }
+    else { await createUserWithEmailAndPassword(auth, email, password); }
+  }catch(err){
+    authError = translateAuthError(err.code);
+    renderAuthScreen();
   }
 }
-async function persist(key){ await Store.save(key, state[key]); }
+
+async function handleForgotPassword(){
+  const email = (document.getElementById('auth-email').value||'').trim();
+  if(!email){ authError = 'Ingresá tu email arriba primero.'; renderAuthScreen(); return; }
+  try{
+    await sendPasswordResetEmail(auth, email);
+    authError = '';
+    renderAuthScreen();
+    showToast('Te enviamos un email para restablecer tu contraseña');
+  }catch(err){
+    authError = translateAuthError(err.code);
+    renderAuthScreen();
+  }
+}
+
+function translateAuthError(code){
+  const map = {
+    'auth/invalid-email': 'El email no es válido.',
+    'auth/user-not-found': 'No existe una cuenta con ese email.',
+    'auth/wrong-password': 'Contraseña incorrecta.',
+    'auth/invalid-credential': 'Email o contraseña incorrectos.',
+    'auth/email-already-in-use': 'Ya existe una cuenta con ese email.',
+    'auth/weak-password': 'La contraseña debe tener al menos 6 caracteres.',
+    'auth/too-many-requests': 'Demasiados intentos. Probá de nuevo en unos minutos.',
+  };
+  return map[code] || 'Ocurrió un error. Intentá de nuevo.';
+}
 
 /* ============================== UTILS ============================== */
 function formatMoney(amount, currency){
@@ -575,29 +656,7 @@ function showToast(msg){
   showToast._t = setTimeout(()=>t.classList.remove('show'), 2200);
 }
 
-/* ---- Google Sheets sync (fire and forget) ---- */
-function syncToSheets(type, record){
-  if(!state.settings.sheetsOn || !state.settings.sheetsUrl) return;
-  try{
-    const enriched = {...record};
-    if(record.accountId){ const acc = accountById(record.accountId); enriched.accountName = acc ? acc.name : ''; }
-    if(type==='investment'){
-      const m = investMetrics(record);
-      enriched.amountInvested = investAmount(record);
-      enriched.totalInvested = m.totalInvested;
-      if(record.status==='closed'){
-        enriched.grossClose = m.grossClose;
-        enriched.netResult = m.netResult;
-        enriched.returnPct = m.returnPct;
-        enriched.annualizedReturn = m.annualized;
-      }
-    }
-    const payload = JSON.stringify({ type, record: enriched, ts: new Date().toISOString() });
-    const base = state.settings.sheetsUrl;
-    const url = base + (base.includes('?') ? '&' : '?') + 'data=' + encodeURIComponent(payload);
-    fetch(url, { method:'GET', mode:'no-cors' }).catch(()=>{});
-  }catch(e){}
-}
+/* ---- (Google Sheets sync retirado: ahora la fuente de datos es Firestore) ---- */
 
 /* ============================== NAV ============================== */
 const NAV_ITEMS = [
@@ -911,9 +970,7 @@ async function deleteAccount(id){
   const used = state.expenses.some(e=>e.accountId===id) || state.investments.some(i=>i.accountId===id) || state.balances.some(b=>b.accountId===id);
   if(used){ showToast('No se puede eliminar: tiene movimientos asociados'); return; }
   if(!confirm('¿Eliminar esta cuenta?')) return;
-  state.accounts = state.accounts.filter(a=>a.id!==id);
-  await persist('accounts');
-  renderAll();
+  await removeRecord('accounts', id);
   showToast('Cuenta eliminada');
 }
 
@@ -1095,6 +1152,15 @@ function renderMetricas(){
 /* ============================== AJUSTES ============================== */
 function renderAjustes(){
   document.getElementById('view-root').innerHTML = `
+    <div class="section-title">Tu cuenta</div>
+    <div class="card">
+      <div class="stat-row" style="border-top:none;padding-top:0;">
+        <span class="stat-currency">Email</span>
+        <span style="font-size:13.5px;font-weight:600;color:var(--ink);">${escapeHtml(currentUser?currentUser.email:'')}</span>
+      </div>
+      <button class="btn-secondary btn-danger" id="logout-btn" style="margin-top:14px;">Cerrar sesión</button>
+    </div>
+
     <div class="section-title">Categorías</div>
     <div class="card">
       <div class="cat-grid" id="cat-list">
@@ -1108,21 +1174,6 @@ function renderAjustes(){
       </div>
     </div>
 
-    <div class="section-title">Sincronización con Google Sheets</div>
-    <div class="card">
-      <div class="help-text" style="margin-bottom:12px;">${HAS_CLAUDE_STORAGE? 'La sincronización en vivo solo funciona en la versión alojada fuera de Claude (GitHub Pages). Acá podés configurar la URL para más adelante, pero los movimientos no se van a enviar mientras uses esta versión dentro de Claude.' : 'Pegá la URL de tu Web App de Google Apps Script. Cada cambio que hagas en este dispositivo se sube solo a la planilla. Para ver los cambios hechos en OTRO dispositivo, usá el botón "Traer lo último de la nube" de abajo (la app no se actualiza sola en tiempo real).'}</div>
-      <div class="field"><label>URL del Web App</label><input type="text" id="sheets-url" placeholder="https://script.google.com/macros/s/.../exec" value="${escapeHtml(state.settings.sheetsUrl||'')}"></div>
-      <div class="switch-row">
-        <span style="font-size:13.5px;font-weight:600;">Sincronización activa</span>
-        <button class="switch ${state.settings.sheetsOn?'on':''}" id="sheets-toggle"><span class="knob"></span></button>
-      </div>
-      <button class="btn-secondary" id="save-sheets" style="margin-top:14px;">Guardar</button>
-      ${!HAS_CLAUDE_STORAGE?`
-        <button class="btn-secondary" id="pull-now-btn" style="margin-top:10px;">Traer lo último de la nube</button>
-        <button class="btn-link" id="push-now-btn" style="margin-top:8px;">¿Datos desincronizados? Reenviar todo desde este dispositivo</button>
-      `:''}
-    </div>
-
     <div class="section-title">Exportar datos</div>
     <div class="card" style="display:flex;flex-direction:column;gap:10px;">
       <button class="btn-secondary" id="exp-gastos">Exportar gastos (CSV)</button>
@@ -1132,30 +1183,16 @@ function renderAjustes(){
 
     <div class="section-title">Zona de riesgo</div>
     <div class="card danger-zone">
-      <div class="help-text" style="margin-bottom:12px;">Esto borra todos los datos guardados en este dispositivo/artefacto de forma permanente.</div>
+      <div class="help-text" style="margin-bottom:12px;">Esto borra todos tus datos (cuentas, gastos, inversiones, saldos) de forma permanente. No se puede deshacer.</div>
       <button class="btn-secondary btn-danger" id="wipe-data">Borrar todos los datos</button>
     </div>
   `;
+  document.getElementById('logout-btn').addEventListener('click', async ()=>{
+    if(!confirm('¿Cerrar sesión?')) return;
+    await signOut(auth);
+  });
   document.getElementById('add-cat').addEventListener('click', addCategory);
   document.querySelectorAll('[data-del-cat]').forEach(el=>el.addEventListener('click', ()=>removeCategory(el.dataset.delCat)));
-  document.getElementById('sheets-toggle').addEventListener('click', (e)=>{ e.target.closest('.switch').classList.toggle('on'); });
-  document.getElementById('save-sheets').addEventListener('click', saveSheetsSettings);
-  const pullNowBtn = document.getElementById('pull-now-btn');
-  if(pullNowBtn) pullNowBtn.addEventListener('click', async ()=>{
-    if(!state.settings.sheetsUrl){ showToast('Primero guardá la URL'); return; }
-    showToast('Buscando lo último...');
-    const ok = await pullRemoteNow();
-    if(ok){ renderAll(); showToast('Datos actualizados'); }
-    else { showToast('No se pudo conectar con Sheets'); }
-  });
-  const pushNowBtn = document.getElementById('push-now-btn');
-  if(pushNowBtn) pushNowBtn.addEventListener('click', async ()=>{
-    if(!state.settings.sheetsUrl){ showToast('Primero guardá la URL'); return; }
-    if(!confirm('Esto sobreescribe en la nube con los datos de ESTE dispositivo. ¿Continuar?')) return;
-    showToast('Reenviando...');
-    await pushAllStateNow();
-    showToast('Reenviado');
-  });
   document.getElementById('exp-gastos').addEventListener('click', ()=>exportCSV('expenses'));
   document.getElementById('exp-inv').addEventListener('click', ()=>exportCSV('investments'));
   document.getElementById('exp-bal').addEventListener('click', ()=>exportCSV('balances'));
@@ -1167,29 +1204,12 @@ async function addCategory(){
   const v = input.value.trim();
   if(!v) return;
   if(state.categories.includes(v)){ showToast('Esa categoría ya existe'); return; }
-  state.categories.push(v);
-  await persist('categories');
-  renderAjustes();
+  await saveCategories([...state.categories, v]);
 }
 async function removeCategory(c){
   const used = state.expenses.some(e=>e.category===c);
   if(used){ showToast('No se puede borrar: tiene gastos asociados'); return; }
-  state.categories = state.categories.filter(x=>x!==c);
-  await persist('categories');
-  renderAjustes();
-}
-async function saveSheetsSettings(){
-  const wasOn = state.settings.sheetsOn;
-  state.settings.sheetsUrl = document.getElementById('sheets-url').value.trim();
-  state.settings.sheetsOn = document.getElementById('sheets-toggle').classList.contains('on');
-  await persist('settings');
-  if(!HAS_CLAUDE_STORAGE && state.settings.sheetsOn && state.settings.sheetsUrl && (!wasOn)){
-    showToast('Ajustes guardados, enviando tus datos...');
-    await pushAllStateNow();
-    showToast('Listo, datos sincronizados');
-  } else {
-    showToast('Ajustes guardados');
-  }
+  await saveCategories(state.categories.filter(x=>x!==c));
 }
 function toCSV(rows, headers){
   const esc = v => `"${String(v==null?'':v).replace(/"/g,'""')}"`;
@@ -1225,9 +1245,12 @@ function exportCSV(type){
 async function wipeData(){
   if(!confirm('Esta acción borra todo. ¿Confirmás?')) return;
   if(!confirm('Confirmá nuevamente: se eliminarán todos los gastos, inversiones, saldos y cuentas.')) return;
-  state.accounts=[]; state.expenses=[]; state.investments=[]; state.balances=[];
-  await persist('accounts'); await persist('expenses'); await persist('investments'); await persist('balances');
-  state.view='resumen'; renderAll();
+  showToast('Borrando...');
+  for(const colName of ['accounts','expenses','investments','balances']){
+    const snap = await getDocs(userCol(colName));
+    for(const d of snap.docs){ await deleteDoc(d.ref); }
+  }
+  state.view='resumen';
   showToast('Datos eliminados');
 }
 
@@ -1298,8 +1321,7 @@ function openExpenseForm(existing){
       };
       if(isEdit){ const idx=state.expenses.findIndex(x=>x.id===existing.id); state.expenses[idx]=record; }
       else state.expenses.push(record);
-      await persist('expenses');
-      syncToSheets('expense', record);
+      await saveRecord('expenses', record);
       closeOverlay(); renderAll(); showToast(isEdit?'Gasto actualizado':'Gasto registrado');
     });
     if(isEdit) document.getElementById('del-expense-btn').addEventListener('click', ()=>{ closeOverlay(); deleteRecord('expenses', existing.id); });
@@ -1383,8 +1405,7 @@ function openInvestmentForm(existing){
         };
         if(isEdit){ const idx=state.investments.findIndex(x=>x.id===existing.id); state.investments[idx]=record; }
         else state.investments.push(record);
-        await persist('investments');
-        syncToSheets('investment', record);
+        await saveRecord('investments', record);
         closeOverlay(); renderAll(); showToast(isEdit?'Inversión actualizada':'Inversión registrada');
       });
     }
@@ -1395,8 +1416,7 @@ function openInvestmentForm(existing){
       const rec = {...state.investments[idx], status:'open'};
       delete rec.closeDate; delete rec.closeUnitPrice; delete rec.closeCommission;
       state.investments[idx]=rec;
-      await persist('investments');
-      syncToSheets('investment', rec);
+      await saveRecord('investments', rec);
       closeOverlay(); renderAll(); showToast('Posición reabierta');
     });
     if(isEdit) document.getElementById('del-inv-btn').addEventListener('click', ()=>{ closeOverlay(); deleteRecord('investments', existing.id); });
@@ -1435,8 +1455,7 @@ function openClosePositionForm(existing){
       const idx = state.investments.findIndex(x=>x.id===existing.id);
       const record = {...state.investments[idx], status:'closed', closeDate, closeUnitPrice, closeCommission};
       state.investments[idx] = record;
-      await persist('investments');
-      syncToSheets('investment', record);
+      await saveRecord('investments', record);
       closeOverlay(); renderAll(); showToast('Posición cerrada');
     });
   });
@@ -1462,8 +1481,7 @@ function openBalanceForm(preselectAccountId){
       const currency = document.getElementById('b-currency-sel').value;
       const record = { id: uid(), createdAt: Date.now(), date: document.getElementById('b-date').value || todayISO(), accountId, balance, currency };
       state.balances.push(record);
-      await persist('balances');
-      syncToSheets('balance', record);
+      await saveRecord('balances', record);
       closeOverlay(); renderAll(); showToast('Saldo registrado');
     });
   });
@@ -1485,7 +1503,7 @@ function openAccountForm(){
       if(!name){ showToast('Ingresá un nombre'); return; }
       const record = { id: uid(), name, bank: document.getElementById('a-bank').value.trim(), type: document.getElementById('a-type').value, currency: document.getElementById('a-curr').value };
       state.accounts.push(record);
-      await persist('accounts');
+      await saveRecord('accounts', record);
       closeOverlay(); renderAll(); showToast('Cuenta creada');
     });
   });
@@ -1494,7 +1512,7 @@ function openAccountForm(){
 async function deleteRecord(key, id){
   if(!confirm('¿Eliminar este registro?')) return;
   state[key] = state[key].filter(x=>x.id!==id);
-  await persist(key);
+  await removeRecord(key, id);
   renderAll();
   showToast('Registro eliminado');
 }
@@ -1518,12 +1536,33 @@ document.getElementById('settings-btn').addEventListener('click', ()=>{ state.vi
 document.getElementById('fab-btn').innerHTML = icon('plus');
 document.getElementById('fab-btn').addEventListener('click', openFabSheet);
 
-(async function init(){
-  await loadAll();
-  renderAll();
-})();
+document.getElementById('auth-root').style.display = '';
+document.getElementById('auth-root').innerHTML = '<div class="auth-loading">Cargando...</div>';
 
-if('serviceWorker' in navigator && !HAS_CLAUDE_STORAGE){
+onAuthStateChanged(auth, async (user) => {
+  if(user){
+    currentUser = user;
+    document.getElementById('auth-root').style.display = 'none';
+    document.getElementById('auth-root').innerHTML = '';
+    document.getElementById('app').style.display = '';
+    document.getElementById('bottom-nav').style.display = '';
+    document.getElementById('fab-btn').style.display = '';
+    await maybeOfferLocalImport();
+    startListeners();
+    state.view = 'resumen';
+    renderAll();
+  } else {
+    currentUser = null;
+    stopListeners();
+    document.getElementById('app').style.display = 'none';
+    document.getElementById('bottom-nav').style.display = 'none';
+    document.getElementById('fab-btn').style.display = 'none';
+    document.getElementById('auth-root').style.display = '';
+    renderAuthScreen();
+  }
+});
+
+if('serviceWorker' in navigator){
   window.addEventListener('load', ()=>{
     navigator.serviceWorker.register('sw.js').catch(()=>{});
   });
