@@ -6,12 +6,12 @@
 <meta name="theme-color" content="#1A1442">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Libreta">
+<meta name="apple-mobile-web-app-title" content="Nomo">
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
-<title>Libreta — Finanzas Personales</title>
+<title>Nomo — Finanzas Personales</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js" onerror="this.onerror=null;var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js';document.head.appendChild(s);"></script>
@@ -375,7 +375,7 @@ hr.div{border:none;border-top:1px solid var(--line);margin:18px 0;}
   <nav class="sidebar" id="sidebar"></nav>
   <div class="main-col">
     <div class="topbar">
-      <div class="mobile-brand"><span class="mark">L</span>Libreta</div>
+      <div class="mobile-brand"><span class="mark">N</span>Nomo</div>
       <div id="topbar-greet"></div>
       <button class="icon-btn" id="settings-btn" aria-label="Ajustes"></button>
     </div>
@@ -464,6 +464,19 @@ async function fetchRemoteState(url){
 async function pushAllStateNow(){
   if(HAS_CLAUDE_STORAGE) return;
   for(const key of SYNC_KEYS){ await pushRemoteState(key, state[key]); }
+}
+
+async function pullRemoteNow(){
+  if(HAS_CLAUDE_STORAGE || !state.settings.sheetsUrl) return false;
+  const remote = await fetchRemoteState(state.settings.sheetsUrl);
+  if(!remote) return false;
+  state.accounts = remote.accounts || [];
+  state.expenses = remote.expenses || [];
+  state.investments = remote.investments || [];
+  state.balances = remote.balances || [];
+  if(remote.categories && remote.categories.length) state.categories = remote.categories;
+  SYNC_KEYS.forEach(k => { try{ localStorage.setItem('libreta:'+k, JSON.stringify(state[k])); }catch(e){} });
+  return true;
 }
 
 /* ============================== STATE ============================== */
@@ -598,7 +611,7 @@ const NAV_ITEMS = [
 function renderNav(){
   const sidebar = document.getElementById('sidebar');
   sidebar.innerHTML = `
-    <div class="brand"><span class="mark">L</span>Libreta</div>
+    <div class="brand"><span class="mark">N</span>Nomo</div>
     ${NAV_ITEMS.map(n=>`<button class="nav-item ${state.view===n.id?'active':''}" data-nav="${n.id}">${icon(n.icon)}${n.label}</button>`).join('')}
     <div class="spacer"></div>
     <button class="nav-item ${state.view==='ajustes'?'active':''}" data-nav="ajustes">${icon('gear')}Ajustes</button>
@@ -1097,14 +1110,17 @@ function renderAjustes(){
 
     <div class="section-title">Sincronización con Google Sheets</div>
     <div class="card">
-      <div class="help-text" style="margin-bottom:12px;">${HAS_CLAUDE_STORAGE? 'La sincronización en vivo solo funciona en la versión alojada fuera de Claude (GitHub Pages). Acá podés configurar la URL para más adelante, pero los movimientos no se van a enviar mientras uses esta versión dentro de Claude.' : 'Pegá la URL de tu Web App de Google Apps Script. Tu planilla va a quedar como la fuente de datos compartida: cada cambio se sube ahí, y cada dispositivo que abra la app con esta misma URL va a cargar el estado más reciente al iniciar.'}</div>
+      <div class="help-text" style="margin-bottom:12px;">${HAS_CLAUDE_STORAGE? 'La sincronización en vivo solo funciona en la versión alojada fuera de Claude (GitHub Pages). Acá podés configurar la URL para más adelante, pero los movimientos no se van a enviar mientras uses esta versión dentro de Claude.' : 'Pegá la URL de tu Web App de Google Apps Script. Cada cambio que hagas en este dispositivo se sube solo a la planilla. Para ver los cambios hechos en OTRO dispositivo, usá el botón "Traer lo último de la nube" de abajo (la app no se actualiza sola en tiempo real).'}</div>
       <div class="field"><label>URL del Web App</label><input type="text" id="sheets-url" placeholder="https://script.google.com/macros/s/.../exec" value="${escapeHtml(state.settings.sheetsUrl||'')}"></div>
       <div class="switch-row">
         <span style="font-size:13.5px;font-weight:600;">Sincronización activa</span>
         <button class="switch ${state.settings.sheetsOn?'on':''}" id="sheets-toggle"><span class="knob"></span></button>
       </div>
       <button class="btn-secondary" id="save-sheets" style="margin-top:14px;">Guardar</button>
-      ${!HAS_CLAUDE_STORAGE?`<button class="btn-secondary" id="sync-now-btn" style="margin-top:10px;">Sincronizar ahora</button>`:''}
+      ${!HAS_CLAUDE_STORAGE?`
+        <button class="btn-secondary" id="pull-now-btn" style="margin-top:10px;">Traer lo último de la nube</button>
+        <button class="btn-link" id="push-now-btn" style="margin-top:8px;">¿Datos desincronizados? Reenviar todo desde este dispositivo</button>
+      `:''}
     </div>
 
     <div class="section-title">Exportar datos</div>
@@ -1124,12 +1140,21 @@ function renderAjustes(){
   document.querySelectorAll('[data-del-cat]').forEach(el=>el.addEventListener('click', ()=>removeCategory(el.dataset.delCat)));
   document.getElementById('sheets-toggle').addEventListener('click', (e)=>{ e.target.closest('.switch').classList.toggle('on'); });
   document.getElementById('save-sheets').addEventListener('click', saveSheetsSettings);
-  const syncNowBtn = document.getElementById('sync-now-btn');
-  if(syncNowBtn) syncNowBtn.addEventListener('click', async ()=>{
+  const pullNowBtn = document.getElementById('pull-now-btn');
+  if(pullNowBtn) pullNowBtn.addEventListener('click', async ()=>{
     if(!state.settings.sheetsUrl){ showToast('Primero guardá la URL'); return; }
-    showToast('Sincronizando...');
+    showToast('Buscando lo último...');
+    const ok = await pullRemoteNow();
+    if(ok){ renderAll(); showToast('Datos actualizados'); }
+    else { showToast('No se pudo conectar con Sheets'); }
+  });
+  const pushNowBtn = document.getElementById('push-now-btn');
+  if(pushNowBtn) pushNowBtn.addEventListener('click', async ()=>{
+    if(!state.settings.sheetsUrl){ showToast('Primero guardá la URL'); return; }
+    if(!confirm('Esto sobreescribe en la nube con los datos de ESTE dispositivo. ¿Continuar?')) return;
+    showToast('Reenviando...');
     await pushAllStateNow();
-    showToast('Estado enviado a Sheets');
+    showToast('Reenviado');
   });
   document.getElementById('exp-gastos').addEventListener('click', ()=>exportCSV('expenses'));
   document.getElementById('exp-inv').addEventListener('click', ()=>exportCSV('investments'));
