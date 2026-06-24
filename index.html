@@ -477,7 +477,7 @@ async function saveCategories(list){
 let unsubscribers = [];
 function startListeners(){
   stopListeners();
-  ['accounts','expenses','investments','balances'].forEach(name=>{
+  ['accounts','expenses','investments','balances','incomes'].forEach(name=>{
     const unsub = onSnapshot(userCol(name), (snap)=>{
       state[name] = snap.docs.map(d=>d.data());
       renderAll();
@@ -489,6 +489,11 @@ function startListeners(){
     renderAll();
   }, (err)=>{ console.error('Error de categorías', err); });
   unsubscribers.push(catUnsub);
+  const profileUnsub = onSnapshot(userMetaDoc('profile'), (snap)=>{
+    state.userProfile = snap.exists() ? snap.data() : { nombre:'', apellido:'', telefono:'' };
+    renderAll();
+  }, (err)=>{ console.error('Error de perfil', err); });
+  unsubscribers.push(profileUnsub);
 }
 function stopListeners(){
   unsubscribers.forEach(u=>u());
@@ -516,7 +521,8 @@ async function maybeOfferLocalImport(){
 
 /* ============================== STATE ============================== */
 let state = {
-  accounts: [], expenses: [], investments: [], balances: [], categories: [],
+  accounts: [], expenses: [], investments: [], balances: [], categories: [], incomes: [],
+  userProfile: { nombre:'', apellido:'', telefono:'' },
   view: 'resumen',
   filters: { gAccount:'all', gCategory:'all', gCurrency:'all', gMonth:'this' },
   metricsPeriod:'this'
@@ -539,6 +545,13 @@ function renderAuthScreen(){
         <div class="auth-title">${isLogin? 'Iniciar sesión' : 'Crear cuenta'}</div>
         <div class="auth-sub">${isLogin? 'Ingresá con tu mail y contraseña.' : 'Registrate gratis para empezar a usar Nomo.'}</div>
         ${authError? `<div class="auth-error">${escapeHtml(authError)}</div>` : ''}
+        ${!isLogin? `
+          <div class="field-row">
+            <div class="field"><label>Nombre</label><input type="text" id="auth-nombre" autocomplete="given-name" placeholder="Tu nombre"></div>
+            <div class="field"><label>Apellido</label><input type="text" id="auth-apellido" autocomplete="family-name" placeholder="Tu apellido"></div>
+          </div>
+          <div class="field"><label>Teléfono (opcional)</label><input type="tel" id="auth-telefono" autocomplete="tel" placeholder="+598 9X XXX XXX"></div>
+        ` : ''}
         <div class="field"><label>Email</label><input type="email" id="auth-email" autocomplete="email" placeholder="tu@email.com"></div>
         <div class="field"><label>Contraseña</label><input type="password" id="auth-password" autocomplete="${isLogin?'current-password':'new-password'}" placeholder="Mínimo 6 caracteres"></div>
         <button class="btn-primary" id="auth-submit">${isLogin? 'Ingresar' : 'Crear cuenta'}</button>
@@ -562,8 +575,15 @@ async function handleAuthSubmit(){
   const btn = document.getElementById('auth-submit');
   btn.textContent = 'Un momento...';
   try{
-    if(authMode==='login'){ await signInWithEmailAndPassword(auth, email, password); }
-    else { await createUserWithEmailAndPassword(auth, email, password); }
+    if(authMode==='login'){
+      await signInWithEmailAndPassword(auth, email, password);
+    } else {
+      const nombre = (document.getElementById('auth-nombre')||{}).value||'';
+      const apellido = (document.getElementById('auth-apellido')||{}).value||'';
+      const telefono = (document.getElementById('auth-telefono')||{}).value||'';
+      const cred = await createUserWithEmailAndPassword(auth, email, password);
+      await setDoc(doc(db,'users',cred.user.uid,'meta','profile'), { nombre, apellido, telefono });
+    }
   }catch(err){
     authError = translateAuthError(err.code);
     renderAuthScreen();
@@ -604,6 +624,7 @@ function formatMoney(amount, currency){
   try{ return new Intl.NumberFormat('es-UY',{style:'currency',currency,...opts}).format(amount); }
   catch(e){ return currency+' '+Number(amount).toFixed(2); }
 }
+function parseMoney(str){ return parseFloat(String(str||'').replace(',','.')); }
 function todayISO(){ const d=new Date(); return d.toISOString().slice(0,10); }
 function formatDate(iso){
   try{ return new Date(iso+'T00:00:00').toLocaleDateString('es-UY',{day:'2-digit',month:'short',year:'numeric'}); }
@@ -721,6 +742,7 @@ function renderResumen(){
     </div>
     <div class="quick-actions">
       <button class="qa-btn" data-quick="expense">${icon('receipt')}Gasto</button>
+      <button class="qa-btn" data-quick="income">${icon('trend')}Ingreso</button>
       <button class="qa-btn" data-quick="investment">${icon('invest')}Inversión</button>
       <button class="qa-btn" data-quick="balance">${icon('vault')}Saldo</button>
     </div>
@@ -729,44 +751,56 @@ function renderResumen(){
       <button class="btn-link" id="go-all-movs">Ir a todos los movimientos</button>
     </div>
     <div class="card">
-      ${movimientos.length? movimientos.map(m=>renderMovementRow(m)).join('') : `<div style="padding:18px 4px;color:var(--text-muted);font-size:13.5px;">Todavía no registraste movimientos.</div>`}
+      ${movimientos.length? movimientos.map(m=>renderMovementRow(m,true)).join('') : `<div style="padding:18px 4px;color:var(--text-muted);font-size:13.5px;">Todavía no registraste movimientos.</div>`}
     </div>
   `;
   document.querySelectorAll('[data-quick]').forEach(el=>el.addEventListener('click',()=>{
     if(el.dataset.quick==='expense') openExpenseForm();
+    if(el.dataset.quick==='income') openIncomeForm();
     if(el.dataset.quick==='investment') openInvestmentForm();
     if(el.dataset.quick==='balance') openBalanceForm();
   }));
   document.getElementById('go-all-movs').addEventListener('click', ()=>{ state.view='movimientos'; renderAll(); });
   document.getElementById('view-root').querySelectorAll('[data-open-account]').forEach(el=>el.addEventListener('click', openAccountForm));
+  bindMovementClicks(document.getElementById('view-root'));
 }
 
 function allMovements(){
   return [
     ...state.expenses.map(e=>({...e,_type:'expense'})),
+    ...state.incomes.map(i=>({...i,_type:'income'})),
     ...state.investments.map(i=>({...i,_type:'investment', date:i.date, amount:investAmount(i)})),
     ...state.balances.map(b=>({...b,_type:'balance', amount:b.balance})),
   ].sort((a,b)=> b.date.localeCompare(a.date) || (b.createdAt||0)-(a.createdAt||0));
 }
 
-function renderMovementRow(m){
+function renderMovementRow(m, clickable=false){
+  const editAttr = clickable ? `data-edit-mov="${m._type}:${m.id}" style="cursor:pointer;"` : '';
   if(m._type==='expense'){
     const acc = accountById(m.accountId);
-    return `<div class="ledger-row">
+    return `<div class="ledger-row" ${editAttr}>
       <div class="stamp" style="color:${colorFor(m.category,state.categories)}">${initials(m.category)}</div>
       <div class="ledger-main"><div class="ledger-title">${escapeHtml(m.category)}</div><div class="ledger-sub">${accountLabel(acc)} · ${formatDate(m.date)}</div></div>
       <div class="ledger-amount neg">−${formatMoney(m.amount,m.currency)}</div>
     </div>`;
   }
+  if(m._type==='income'){
+    const acc = accountById(m.accountId);
+    return `<div class="ledger-row" ${editAttr}>
+      <div class="stamp" style="color:var(--income)">$+</div>
+      <div class="ledger-main"><div class="ledger-title">${escapeHtml(m.concept||'Ingreso')}</div><div class="ledger-sub">${accountLabel(acc)} · ${formatDate(m.date)}</div></div>
+      <div class="ledger-amount pos">+${formatMoney(m.amount,m.currency)}</div>
+    </div>`;
+  }
   if(m._type==='investment'){
-    return `<div class="ledger-row">
+    return `<div class="ledger-row" ${editAttr}>
       <div class="stamp" style="color:var(--income)">${initials(m.name)}</div>
       <div class="ledger-main"><div class="ledger-title">${escapeHtml(m.name)}</div><div class="ledger-sub">${m.invType||''} · ${formatDate(m.date)}</div></div>
       <div class="ledger-amount pos">${formatMoney(m.amount,m.currency)}</div>
     </div>`;
   }
   const acc = accountById(m.accountId);
-  return `<div class="ledger-row">
+  return `<div class="ledger-row" ${editAttr}>
     <div class="stamp" style="color:var(--ink-light)">${icon('vault')}</div>
     <div class="ledger-main"><div class="ledger-title">Saldo · ${accountLabel(acc)}</div><div class="ledger-sub">${formatDate(m.date)}</div></div>
     <div class="ledger-amount">${formatMoney(m.amount,m.currency)}</div>
@@ -774,8 +808,16 @@ function renderMovementRow(m){
 }
 
 function latestBalance(accountId){
-  const list = state.balances.filter(b=>b.accountId===accountId).sort((a,b)=>a.date.localeCompare(b.date));
-  return list.length? Number(list[list.length-1].balance) : 0;
+  const bals = state.balances.filter(b=>b.accountId===accountId).sort((a,b)=>a.date.localeCompare(b.date));
+  if(!bals.length) return 0;
+  const base = bals[bals.length-1];
+  const baseDate = base.date;
+  const baseAmount = Number(base.balance);
+  // sumar ingresos posteriores al saldo base
+  const incomesAfter = state.incomes.filter(i=>i.accountId===accountId && i.date>=baseDate).reduce((s,i)=>s+Number(i.amount),0);
+  // restar gastos posteriores al saldo base
+  const expensesAfter = state.expenses.filter(e=>e.accountId===accountId && e.date>=baseDate).reduce((s,e)=>s+Number(e.amount),0);
+  return baseAmount + incomesAfter - expensesAfter;
 }
 
 /* ============================== TODOS LOS MOVIMIENTOS ============================== */
@@ -795,6 +837,7 @@ function renderMovimientos(){
       <select class="filter-select" id="mv-tipo">
         <option value="all" ${f.tipo==='all'?'selected':''}>Todos los tipos</option>
         <option value="expense" ${f.tipo==='expense'?'selected':''}>Gastos</option>
+        <option value="income" ${f.tipo==='income'?'selected':''}>Ingresos</option>
         <option value="investment" ${f.tipo==='investment'?'selected':''}>Inversiones</option>
         <option value="balance" ${f.tipo==='balance'?'selected':''}>Saldos</option>
       </select>
@@ -805,12 +848,13 @@ function renderMovimientos(){
       </select>
     </div>
     <div class="card">
-      ${list.length? list.map(m=>renderMovementRow(m)).join('') : `<div style="padding:20px 4px;color:var(--text-muted);font-size:13.5px;">Sin movimientos en este filtro.</div>`}
+      ${list.length? list.map(m=>renderMovementRow(m,true)).join('') : `<div style="padding:20px 4px;color:var(--text-muted);font-size:13.5px;">Sin movimientos en este filtro.</div>`}
     </div>
   `;
   document.getElementById('back-resumen').addEventListener('click', ()=>{ state.view='resumen'; renderAll(); });
   document.getElementById('mv-tipo').addEventListener('change', e=>{ state.movFilters.tipo=e.target.value; renderMovimientos(); });
   document.getElementById('mv-month').addEventListener('change', e=>{ state.movFilters.month=e.target.value; renderMovimientos(); });
+  bindMovementClicks(document.getElementById('view-root'));
 }
 
 function emptyState(iconName,title,sub,cta,action){
@@ -946,19 +990,20 @@ function renderCuentas(){
     <button class="btn-secondary" id="add-acc-link" style="margin-top:6px;">+ Agregar cuenta</button>
   `;
   document.getElementById('add-acc-link').addEventListener('click', ()=>openAccountForm());
-  document.querySelectorAll('[data-bal-acc]').forEach(el=>el.addEventListener('click', ()=>openBalanceForm(el.dataset.balAcc)));
-  document.querySelectorAll('[data-del-acc]').forEach(el=>el.addEventListener('click', ()=>deleteAccount(el.dataset.delAcc)));
+  document.querySelectorAll('[data-bal-acc]').forEach(el=>el.addEventListener('click', (ev)=>{ ev.stopPropagation(); openBalanceForm(el.dataset.balAcc); }));
+  document.querySelectorAll('[data-del-acc]').forEach(el=>el.addEventListener('click', (ev)=>{ ev.stopPropagation(); deleteAccount(el.dataset.delAcc); }));
+  document.querySelectorAll('[data-view-acc]').forEach(el=>el.addEventListener('click', ()=>openAccountDetail(el.dataset.viewAcc)));
 }
 
 function renderAccountCard(a){
   const bal = latestBalance(a.id);
   const hist = state.balances.filter(b=>b.accountId===a.id).sort((x,y)=>y.date.localeCompare(x.date));
-  return `<div class="acc-card">
+  return `<div class="acc-card" data-view-acc="${a.id}" style="cursor:pointer;">
     <div class="acc-card-top">
       <div><div class="acc-name">${escapeHtml(a.name)}</div><div class="acc-meta">${escapeHtml(a.bank||'')}${a.bank?' · ':''}${escapeHtml(a.type)}</div></div>
       <div class="acc-balance">${formatMoney(bal,a.currency)}</div>
     </div>
-    ${hist.length? `<div class="help-text">Último saldo: ${formatDate(hist[0].date)}</div>` : `<div class="help-text">Sin saldo registrado todavía.</div>`}
+    ${hist.length? `<div class="help-text">Saldo actualizado al ${formatDate(hist[0].date)}</div>` : `<div class="help-text">Sin saldo registrado todavía.</div>`}
     <div class="acc-actions">
       <button class="btn-mini" data-bal-acc="${a.id}">Registrar saldo</button>
       <button class="btn-mini btn-danger" data-del-acc="${a.id}">Eliminar</button>
@@ -966,10 +1011,57 @@ function renderAccountCard(a){
   </div>`;
 }
 
+function openAccountDetail(accountId){
+  const a = accountById(accountId);
+  if(!a) return;
+  const bal = latestBalance(a.id);
+  const movs = allMovements().filter(m=>m.accountId===accountId);
+  const balHist = state.balances.filter(b=>b.accountId===accountId).sort((x,y)=>y.date.localeCompare(x.date));
+  const totalIngresos = state.incomes.filter(i=>i.accountId===accountId).reduce((s,i)=>s+Number(i.amount),0);
+  const totalGastos = state.expenses.filter(e=>e.accountId===accountId).reduce((s,e)=>s+Number(e.amount),0);
+  openOverlay(`
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
+      <button class="icon-btn" id="back-acc">${icon('back')}</button>
+      <div>
+        <div style="font-family:var(--font-display);font-size:17px;font-weight:700;">${escapeHtml(a.name)}</div>
+        <div style="font-size:12px;color:var(--text-muted);">${escapeHtml(a.bank||'')}${a.bank?' · ':''}${a.type}</div>
+      </div>
+    </div>
+    <div class="grid-2" style="margin-bottom:14px;">
+      <div class="card stat-card"><div class="stat-label">Saldo actual</div><div class="stat-row" style="border:none;padding:0;"><span class="stat-amount">${formatMoney(bal,a.currency)}</span></div></div>
+      <div class="card stat-card"><div class="stat-label">Ingresos totales</div><div class="stat-row" style="border:none;padding:0;"><span class="stat-amount pos">+${formatMoney(totalIngresos,a.currency)}</span></div></div>
+    </div>
+    <div class="card stat-card" style="margin-bottom:14px;"><div class="stat-label">Gastos totales</div><div class="stat-row" style="border:none;padding:0;"><span class="stat-amount neg">−${formatMoney(totalGastos,a.currency)}</span></div></div>
+    <div class="section-title">Movimientos de esta cuenta</div>
+    <div class="card" style="padding:6px 14px;">
+      ${movs.length? movs.map(m=>renderMovementRow(m,true)).join('') : '<div style="padding:16px 4px;color:var(--text-muted);font-size:13.5px;">Sin movimientos registrados.</div>'}
+    </div>
+    ${balHist.length? `<div class="section-title">Historial de saldos registrados</div>
+    <div class="card" style="padding:6px 14px;">
+      ${balHist.map(b=>`<div class="ledger-row"><div class="ledger-main"><div class="ledger-title">${formatDate(b.date)}</div></div><div class="ledger-amount">${formatMoney(b.balance,a.currency)}</div></div>`).join('')}
+    </div>`:''}
+  `, ()=>{
+    document.getElementById('back-acc').addEventListener('click', closeOverlay);
+    bindMovementClicks(document.getElementById('sheet'));
+  }, true);
+}
+
 async function deleteAccount(id){
-  const used = state.expenses.some(e=>e.accountId===id) || state.investments.some(i=>i.accountId===id) || state.balances.some(b=>b.accountId===id);
-  if(used){ showToast('No se puede eliminar: tiene movimientos asociados'); return; }
-  if(!confirm('¿Eliminar esta cuenta?')) return;
+  const expCount = state.expenses.filter(e=>e.accountId===id).length;
+  const invCount = state.investments.filter(i=>i.accountId===id).length;
+  const balCount = state.balances.filter(b=>b.accountId===id).length;
+  const incCount = state.incomes.filter(i=>i.accountId===id).length;
+  const total = expCount + invCount + balCount + incCount;
+  const msg = total>0
+    ? `Esta cuenta tiene ${total} movimiento(s) asociado(s). Si la eliminás, se van a borrar también todos esos registros. ¿Confirmás?`
+    : '¿Eliminar esta cuenta?';
+  if(!confirm(msg)) return;
+  if(total>0 && !confirm('Confirmá nuevamente: se borrarán la cuenta y todos sus movimientos.')) return;
+  showToast('Eliminando...');
+  for(const e of state.expenses.filter(e=>e.accountId===id)) await removeRecord('expenses',e.id);
+  for(const i of state.investments.filter(i=>i.accountId===id)) await removeRecord('investments',i.id);
+  for(const b of state.balances.filter(b=>b.accountId===id)) await removeRecord('balances',b.id);
+  for(const i of state.incomes.filter(i=>i.accountId===id)) await removeRecord('incomes',i.id);
   await removeRecord('accounts', id);
   showToast('Cuenta eliminada');
 }
@@ -1158,7 +1250,13 @@ function renderAjustes(){
         <span class="stat-currency">Email</span>
         <span style="font-size:13.5px;font-weight:600;color:var(--ink);">${escapeHtml(currentUser?currentUser.email:'')}</span>
       </div>
-      <button class="btn-secondary btn-danger" id="logout-btn" style="margin-top:14px;">Cerrar sesión</button>
+      <div class="field-row" style="margin-top:12px;">
+        <div class="field"><label>Nombre</label><input type="text" id="prf-nombre" value="${escapeHtml(state.userProfile.nombre||'')}"></div>
+        <div class="field"><label>Apellido</label><input type="text" id="prf-apellido" value="${escapeHtml(state.userProfile.apellido||'')}"></div>
+      </div>
+      <div class="field"><label>Teléfono</label><input type="tel" id="prf-telefono" value="${escapeHtml(state.userProfile.telefono||'')}" placeholder="+598 9X XXX XXX"></div>
+      <button class="btn-secondary" id="save-profile-btn" style="margin-top:4px;">Guardar datos de perfil</button>
+      <button class="btn-secondary btn-danger" id="logout-btn" style="margin-top:10px;">Cerrar sesión</button>
     </div>
 
     <div class="section-title">Categorías</div>
@@ -1190,6 +1288,15 @@ function renderAjustes(){
   document.getElementById('logout-btn').addEventListener('click', async ()=>{
     if(!confirm('¿Cerrar sesión?')) return;
     await signOut(auth);
+  });
+  document.getElementById('save-profile-btn').addEventListener('click', async ()=>{
+    const profile = {
+      nombre: document.getElementById('prf-nombre').value.trim(),
+      apellido: document.getElementById('prf-apellido').value.trim(),
+      telefono: document.getElementById('prf-telefono').value.trim()
+    };
+    await setDoc(userMetaDoc('profile'), profile);
+    showToast('Perfil actualizado');
   });
   document.getElementById('add-cat').addEventListener('click', addCategory);
   document.querySelectorAll('[data-del-cat]').forEach(el=>el.addEventListener('click', ()=>removeCategory(el.dataset.delCat)));
@@ -1246,7 +1353,7 @@ async function wipeData(){
   if(!confirm('Esta acción borra todo. ¿Confirmás?')) return;
   if(!confirm('Confirmá nuevamente: se eliminarán todos los gastos, inversiones, saldos y cuentas.')) return;
   showToast('Borrando...');
-  for(const colName of ['accounts','expenses','investments','balances']){
+  for(const colName of ['accounts','expenses','investments','balances','incomes']){
     const snap = await getDocs(userCol(colName));
     for(const d of snap.docs){ await deleteDoc(d.ref); }
   }
@@ -1255,9 +1362,12 @@ async function wipeData(){
 }
 
 /* ============================== MODALS / SHEETS ============================== */
-function openOverlay(html, onOpen){
+function openOverlay(html, onOpen, fullSheet=false){
   const overlay = document.getElementById('overlay');
-  document.getElementById('sheet').innerHTML = `<div class="sheet-handle"></div>${html}`;
+  const sheet = document.getElementById('sheet');
+  sheet.innerHTML = `<div class="sheet-handle"></div>${html}`;
+  if(fullSheet) sheet.style.maxHeight='95vh';
+  else sheet.style.maxHeight='';
   overlay.classList.add('open');
   overlay.onclick = (e)=>{ if(e.target===overlay) closeOverlay(); };
   if(onOpen) onOpen();
@@ -1269,12 +1379,14 @@ function openFabSheet(){
     <div class="sheet-title">¿Qué querés registrar?</div>
     <div class="action-sheet">
       <button class="as-item" id="fab-expense"><span class="as-icon" style="background:rgba(255,77,109,.12);color:var(--expense);">${icon('receipt')}</span>Gasto</button>
+      <button class="as-item" id="fab-income"><span class="as-icon" style="background:rgba(18,200,146,.12);color:var(--income);">${icon('trend')}</span>Ingreso</button>
       <button class="as-item" id="fab-investment"><span class="as-icon" style="background:rgba(18,200,146,.12);color:var(--income);">${icon('invest')}</span>Inversión</button>
       <button class="as-item" id="fab-balance"><span class="as-icon" style="background:rgba(108,76,255,.12);color:var(--ink-light);">${icon('vault')}</span>Saldo de cuenta</button>
       <button class="as-item" id="fab-account"><span class="as-icon" style="background:var(--brass-soft);color:var(--brass);">${icon('bank')}</span>Nueva cuenta</button>
     </div>
   `);
   document.getElementById('fab-expense').addEventListener('click', ()=>openExpenseForm());
+  document.getElementById('fab-income').addEventListener('click', ()=>{ closeOverlay(); openIncomeForm(); });
   document.getElementById('fab-investment').addEventListener('click', ()=>openInvestmentForm());
   document.getElementById('fab-balance').addEventListener('click', ()=>openBalanceForm());
   document.getElementById('fab-account').addEventListener('click', ()=>openAccountForm());
@@ -1287,7 +1399,7 @@ function openExpenseForm(existing){
   openOverlay(`
     <div class="sheet-title">${isEdit?'Editar gasto':'Nuevo gasto'}</div>
     <div class="field-row">
-      <div class="field field-amount" style="flex:2;"><label>Monto</label><input type="number" inputmode="decimal" id="f-amount" placeholder="0" value="${existing?existing.amount:''}"></div>
+      <div class="field field-amount" style="flex:2;"><label>Monto</label><input type="text" inputmode="decimal" id="f-amount" placeholder="0" value="${existing?existing.amount:''}"></div>
       <div class="field" style="flex:1;"><label>Moneda</label><select id="f-currency-sel">${CURRENCIES.map(c=>`<option ${defaultCurrency===c?'selected':''}>${c}</option>`).join('')}</select></div>
     </div>
     <div class="field"><label>Categoría</label>
@@ -1307,7 +1419,7 @@ function openExpenseForm(existing){
       el.classList.add('selected'); selectedCat = el.dataset.cat;
     }));
     document.getElementById('save-expense').addEventListener('click', async ()=>{
-      const amount = parseFloat(document.getElementById('f-amount').value);
+      const amount = parseMoney(document.getElementById('f-amount').value);
       if(!amount || amount<=0){ showToast('Ingresá un monto válido'); return; }
       const accountId = document.getElementById('f-account-sel').value;
       const currency = document.getElementById('f-currency-sel').value;
@@ -1328,6 +1440,57 @@ function openExpenseForm(existing){
   });
 }
 
+function openIncomeForm(existing){
+  if(state.accounts.length===0){ openAccountForm(); showToast('Primero creá una cuenta'); return; }
+  const isEdit = !!existing;
+  const defaultAcc = existing ? accountById(existing.accountId) : state.accounts[0];
+  const defaultCurrency = existing ? existing.currency : (defaultAcc||{}).currency || 'UYU';
+  openOverlay(`
+    <div class="sheet-title">${isEdit?'Editar ingreso':'Registrar ingreso'}</div>
+    <div class="field-row">
+      <div class="field field-amount" style="flex:2;"><label>Monto</label><input type="text" inputmode="decimal" id="inc-amount" placeholder="0" value="${existing?existing.amount:''}"></div>
+      <div class="field"><label>Moneda</label><select id="inc-currency-sel">${CURRENCIES.map(c=>`<option ${c===defaultCurrency?'selected':''}>${c}</option>`).join('')}</select></div>
+    </div>
+    <div class="field"><label>Concepto</label><input type="text" id="inc-concept" placeholder="Ej: Sueldo, Honorarios..." value="${existing?escapeHtml(existing.concept||''):''}"></div>
+    <div class="field"><label>Cuenta</label><select id="inc-account-sel">${state.accounts.map(a=>`<option value="${a.id}" ${(defaultAcc&&a.id===defaultAcc.id)?'selected':''}>${escapeHtml(a.name)}</option>`).join('')}</select></div>
+    <div class="field"><label>Fecha</label><input type="date" id="inc-date" value="${existing?existing.date:todayISO()}"></div>
+    <div class="field"><label>Nota (opcional)</label><input type="text" id="inc-note" placeholder="Ej: Mes de enero..." value="${existing?escapeHtml(existing.note||''):''}"></div>
+    <button class="btn-primary" id="save-income">${isEdit?'Guardar cambios':'Registrar ingreso'}</button>
+    ${isEdit?`<button class="btn-secondary btn-danger" id="del-income-btn" style="margin-top:10px;">Eliminar</button>`:''}
+  `, ()=>{
+    document.getElementById('save-income').addEventListener('click', async ()=>{
+      const amount = parseMoney(document.getElementById('inc-amount').value);
+      if(!amount || amount<=0){ showToast('Ingresá un monto válido'); return; }
+      const record = {
+        id: existing ? existing.id : uid(),
+        createdAt: existing ? (existing.createdAt||Date.now()) : Date.now(),
+        date: document.getElementById('inc-date').value || todayISO(),
+        concept: document.getElementById('inc-concept').value.trim() || 'Ingreso',
+        accountId: document.getElementById('inc-account-sel').value,
+        amount, currency: document.getElementById('inc-currency-sel').value,
+        note: document.getElementById('inc-note').value.trim()
+      };
+      if(isEdit){ const idx=state.incomes.findIndex(x=>x.id===existing.id); state.incomes[idx]=record; }
+      else state.incomes.push(record);
+      await saveRecord('incomes', record);
+      closeOverlay(); renderAll(); showToast(isEdit?'Ingreso actualizado':'Ingreso registrado');
+    });
+    if(isEdit) document.getElementById('del-income-btn').addEventListener('click', ()=>{ closeOverlay(); deleteRecord('incomes', existing.id); });
+  });
+}
+
+function bindMovementClicks(container){
+  container.querySelectorAll('[data-edit-mov]').forEach(el=>{
+    el.addEventListener('click', ()=>{
+      const [type, id] = el.dataset.editMov.split(':');
+      if(type==='expense') openExpenseForm(state.expenses.find(x=>x.id===id));
+      if(type==='income') openIncomeForm(state.incomes.find(x=>x.id===id));
+      if(type==='investment') openInvestmentForm(state.investments.find(x=>x.id===id));
+      if(type==='balance') openBalanceForm(state.balances.find(x=>x.id===id)?.accountId);
+    });
+  });
+}
+
 function openInvestmentForm(existing){
   if(state.accounts.length===0){ closeOverlay(); openAccountForm(); showToast('Primero creá una cuenta'); return; }
   const isEdit = !!existing;
@@ -1341,11 +1504,11 @@ function openInvestmentForm(existing){
     <div class="field"><label>Nombre</label><input type="text" id="i-name" placeholder="Ej: Apple Inc." value="${existing?escapeHtml(existing.name):''}" ${isClosed?'disabled':''}></div>
     <div class="field"><label>Tipo</label><select id="i-type" ${isClosed?'disabled':''}>${INVESTMENT_TYPES.map(t=>`<option ${existing&&existing.invType===t?'selected':''}>${t}</option>`).join('')}</select></div>
     <div class="field-row">
-      <div class="field"><label>Cantidad</label><input type="number" inputmode="decimal" step="any" id="i-qty" placeholder="0" value="${existing?existing.quantity:''}" ${isClosed?'disabled':''}></div>
-      <div class="field"><label>Precio de compra (por unidad)</label><input type="number" inputmode="decimal" step="any" id="i-price" placeholder="0" value="${existing?existing.unitPrice:''}" ${isClosed?'disabled':''}></div>
+      <div class="field"><label>Cantidad</label><input type="text" inputmode="decimal" id="i-qty" placeholder="0" value="${existing?existing.quantity:''}" ${isClosed?'disabled':''}></div>
+      <div class="field"><label>Precio de compra (por unidad)</label><input type="text" inputmode="decimal" id="i-price" placeholder="0" value="${existing?existing.unitPrice:''}" ${isClosed?'disabled':''}></div>
     </div>
     <div class="help-text" id="i-amount-display" style="margin:-6px 0 14px 0;font-family:var(--font-mono);">Valor de mercado: ${formatMoney(existing?investAmount(existing):0, defaultCurrency)}</div>
-    <div class="field"><label>Comisión total (de la operación)</label><input type="number" inputmode="decimal" id="i-commission" value="${existing&&existing.commission?existing.commission:''}" placeholder="0" ${isClosed?'disabled':''}></div>
+    <div class="field"><label>Comisión total (de la operación)</label><input type="text" inputmode="decimal" id="i-commission" value="${existing&&existing.commission?existing.commission:''}" placeholder="0" ${isClosed?'disabled':''}></div>
     <div class="help-text" id="i-total-display" style="margin:-6px 0 14px 0;font-family:var(--font-mono);font-weight:600;color:var(--ink);">Valor total invertido: ${formatMoney(existing?investTotalInvested(existing):0, defaultCurrency)}</div>
     <div class="field-row">
       <div class="field"><label>Cuenta</label><select id="i-account-sel" ${isClosed?'disabled':''}>${state.accounts.map(a=>`<option value="${a.id}" ${existing&&existing.accountId===a.id?'selected':''}>${escapeHtml(a.name)} (${a.currency})</option>`).join('')}</select></div>
@@ -1371,9 +1534,9 @@ function openInvestmentForm(existing){
     ${isEdit?`<button class="btn-secondary btn-danger" id="del-inv-btn" style="margin-top:10px;">Eliminar</button>`:''}
   `, ()=>{
     function updateTotalDisplay(){
-      const qty = parseFloat(document.getElementById('i-qty').value)||0;
-      const price = parseFloat(document.getElementById('i-price').value)||0;
-      const comm = parseFloat(document.getElementById('i-commission').value)||0;
+      const qty = parseMoney(document.getElementById('i-qty').value)||0;
+      const price = parseMoney(document.getElementById('i-price').value)||0;
+      const comm = parseMoney(document.getElementById('i-commission').value)||0;
       const curr = document.getElementById('i-currency-sel') ? document.getElementById('i-currency-sel').value : defaultCurrency;
       const amount = qty*price;
       document.getElementById('i-amount-display').textContent = 'Valor de mercado: ' + formatMoney(amount, curr);
@@ -1385,11 +1548,11 @@ function openInvestmentForm(existing){
       document.getElementById('i-commission').addEventListener('input', updateTotalDisplay);
       document.getElementById('i-currency-sel').addEventListener('change', updateTotalDisplay);
       document.getElementById('save-inv').addEventListener('click', async ()=>{
-        const quantity = parseFloat(document.getElementById('i-qty').value);
-        const unitPrice = parseFloat(document.getElementById('i-price').value);
+        const quantity = parseMoney(document.getElementById('i-qty').value);
+        const unitPrice = parseMoney(document.getElementById('i-price').value);
         if(!quantity || quantity<=0){ showToast('Ingresá una cantidad válida'); return; }
         if(!unitPrice || unitPrice<=0){ showToast('Ingresá un precio de compra válido'); return; }
-        const commission = parseFloat(document.getElementById('i-commission').value)||0;
+        const commission = parseMoney(document.getElementById('i-commission').value)||0;
         const name = document.getElementById('i-name').value.trim();
         if(!name){ showToast('Ingresá un nombre'); return; }
         const accountId = document.getElementById('i-account-sel').value;
@@ -1428,15 +1591,15 @@ function openClosePositionForm(existing){
     <div class="sheet-title">Cerrar posición</div>
     <div class="help-text" style="margin-bottom:14px;">${escapeHtml(existing.name)} · ${existing.quantity} unidades · Valor total invertido: ${formatMoney(investTotalInvested(existing), existing.currency)}</div>
     <div class="field"><label>Fecha de cierre</label><input type="date" id="c-date" value="${todayISO()}"></div>
-    <div class="field"><label>Precio de venta (por unidad)</label><input type="number" inputmode="decimal" step="any" id="c-price" placeholder="0"></div>
+    <div class="field"><label>Precio de venta (por unidad)</label><input type="text" inputmode="decimal" id="c-price" placeholder="0"></div>
     <div class="help-text" id="c-gross-display" style="margin:-6px 0 14px 0;font-family:var(--font-mono);">Valor bruto de venta: ${formatMoney(0, existing.currency)}</div>
-    <div class="field"><label>Comisión total de cierre</label><input type="number" inputmode="decimal" id="c-commission" placeholder="0"></div>
+    <div class="field"><label>Comisión total de cierre</label><input type="text" inputmode="decimal" id="c-commission" placeholder="0"></div>
     <div class="help-text" id="c-preview" style="font-family:var(--font-mono);"></div>
     <button class="btn-primary" id="confirm-close" style="margin-top:14px;">Confirmar cierre</button>
   `, ()=>{
     function preview(){
-      const cp = parseFloat(document.getElementById('c-price').value)||0;
-      const cc = parseFloat(document.getElementById('c-commission').value)||0;
+      const cp = parseMoney(document.getElementById('c-price').value)||0;
+      const cc = parseMoney(document.getElementById('c-commission').value)||0;
       const cd = document.getElementById('c-date').value || todayISO();
       const gross = Number(existing.quantity||0) * cp;
       document.getElementById('c-gross-display').textContent = 'Valor bruto de venta: ' + formatMoney(gross, existing.currency);
@@ -1448,9 +1611,9 @@ function openClosePositionForm(existing){
     document.getElementById('c-commission').addEventListener('input', preview);
     document.getElementById('c-date').addEventListener('change', preview);
     document.getElementById('confirm-close').addEventListener('click', async ()=>{
-      const closeUnitPrice = parseFloat(document.getElementById('c-price').value);
+      const closeUnitPrice = parseMoney(document.getElementById('c-price').value);
       if(!closeUnitPrice || closeUnitPrice<=0){ showToast('Ingresá un precio de venta válido'); return; }
-      const closeCommission = parseFloat(document.getElementById('c-commission').value)||0;
+      const closeCommission = parseMoney(document.getElementById('c-commission').value)||0;
       const closeDate = document.getElementById('c-date').value || todayISO();
       const idx = state.investments.findIndex(x=>x.id===existing.id);
       const record = {...state.investments[idx], status:'closed', closeDate, closeUnitPrice, closeCommission};
@@ -1468,14 +1631,14 @@ function openBalanceForm(preselectAccountId){
     <div class="sheet-title">Registrar saldo</div>
     <div class="field"><label>Cuenta</label><select id="b-account-sel">${state.accounts.map(a=>`<option value="${a.id}" ${preselectAccountId===a.id?'selected':''}>${escapeHtml(a.name)} (${a.currency})</option>`).join('')}</select></div>
     <div class="field-row">
-      <div class="field field-amount" style="flex:2;"><label>Saldo actual</label><input type="number" inputmode="decimal" id="b-amount" placeholder="0"></div>
+      <div class="field field-amount" style="flex:2;"><label>Saldo actual</label><input type="text" inputmode="decimal" id="b-amount" placeholder="0"></div>
       <div class="field" style="flex:1;"><label>Moneda</label><select id="b-currency-sel">${CURRENCIES.map(c=>`<option ${defaultAcc&&defaultAcc.currency===c?'selected':''}>${c}</option>`).join('')}</select></div>
     </div>
     <div class="field"><label>Fecha</label><input type="date" id="b-date" value="${todayISO()}"></div>
     <button class="btn-primary" id="save-bal">Guardar saldo</button>
   `, ()=>{
     document.getElementById('save-bal').addEventListener('click', async ()=>{
-      const balance = parseFloat(document.getElementById('b-amount').value);
+      const balance = parseMoney(document.getElementById('b-amount').value);
       if(isNaN(balance)){ showToast('Ingresá un saldo válido'); return; }
       const accountId = document.getElementById('b-account-sel').value;
       const currency = document.getElementById('b-currency-sel').value;
